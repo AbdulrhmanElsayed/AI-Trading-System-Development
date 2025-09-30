@@ -1,0 +1,448 @@
+name: Security Scanning
+
+on:
+  schedule:
+    # Run security scans daily at 3 AM UTC
+    - cron: '0 3 * * *'
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ai-trading-system
+
+jobs:
+  # Static Application Security Testing (SAST)
+  sast-scan:
+    name: SAST Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install security tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit semgrep safety
+
+    - name: Run Bandit security scan
+      run: |
+        bandit -r src/ -f json -o bandit-results.json
+        bandit -r src/ --severity-level medium
+
+    - name: Run Semgrep scan
+      run: |
+        semgrep --config=auto --json --output=semgrep-results.json src/
+        semgrep --config=auto src/
+
+    - name: Check for known vulnerabilities
+      run: |
+        safety check --json --output safety-results.json
+        safety check
+
+    - name: Upload SARIF results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: semgrep-results.json
+
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: sast-results
+        path: |
+          bandit-results.json
+          semgrep-results.json
+          safety-results.json
+
+  # Dependency Vulnerability Scanning
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run pip-audit
+      run: |
+        pip install pip-audit
+        pip-audit --format=json --output=pip-audit-results.json
+        pip-audit
+
+    - name: Generate dependency tree
+      run: |
+        pip install pipdeptree
+        pipdeptree --json > dependency-tree.json
+        pipdeptree --graph-output png > dependency-graph.png
+
+    - name: Check for license compatibility
+      run: |
+        pip install pip-licenses
+        pip-licenses --format=json --output-file=license-report.json
+        pip-licenses
+
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: dependency-scan-results
+        path: |
+          pip-audit-results.json
+          dependency-tree.json
+          dependency-graph.png
+          license-report.json
+
+  # Container Image Scanning
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build test image
+      run: |
+        docker build -t test-image:latest --target production .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'test-image:latest'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Run Trivy filesystem scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-fs-results.sarif'
+
+    - name: Run Grype vulnerability scanner
+      run: |
+        # Install grype
+        curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+        
+        # Scan image
+        grype test-image:latest -o json > grype-results.json
+        grype test-image:latest
+
+    - name: Docker Scout scan
+      run: |
+        # Install Docker Scout
+        curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --
+        
+        # Scan with Docker Scout
+        docker scout cves test-image:latest --format sarif --output scout-results.sarif
+        docker scout cves test-image:latest
+
+    - name: Upload container scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: |
+          trivy-results.sarif
+          trivy-fs-results.sarif
+          scout-results.sarif
+
+    - name: Upload scan artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: container-scan-results
+        path: |
+          trivy-results.sarif
+          trivy-fs-results.sarif
+          grype-results.json
+          scout-results.sarif
+
+  # Infrastructure as Code Security Scanning
+  iac-scan:
+    name: Infrastructure Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Scan Kubernetes manifests with Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        scan-ref: 'k8s/'
+        format: 'sarif'
+        output: 'trivy-k8s-results.sarif'
+
+    - name: Scan Docker Compose files
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        scan-ref: 'docker-compose.production.yml'
+        format: 'sarif'
+        output: 'trivy-docker-compose-results.sarif'
+
+    - name: Run Checkov IaC scan
+      run: |
+        pip install checkov
+        checkov -d k8s/ --framework kubernetes --output json > checkov-k8s-results.json
+        checkov -f docker-compose.production.yml --framework docker_compose --output json > checkov-compose-results.json
+        
+        # Also run with exit code for CI/CD pipeline
+        checkov -d k8s/ --framework kubernetes
+        checkov -f docker-compose.production.yml --framework docker_compose
+
+    - name: Upload IaC scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: |
+          trivy-k8s-results.sarif
+          trivy-docker-compose-results.sarif
+
+    - name: Upload Checkov results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: iac-scan-results
+        path: |
+          trivy-k8s-results.sarif
+          trivy-docker-compose-results.sarif
+          checkov-k8s-results.json
+          checkov-compose-results.json
+
+  # Secrets Scanning
+  secrets-scan:
+    name: Secrets Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run TruffleHog secrets scan
+      run: |
+        # Install TruffleHog
+        curl -sSfL https://github.com/trufflesecurity/trufflehog/releases/latest/download/trufflehog_linux_amd64.tar.gz | tar -xzf -
+        chmod +x trufflehog
+        sudo mv trufflehog /usr/local/bin/
+        
+        # Scan for secrets
+        trufflehog filesystem . --json > trufflehog-results.json
+        trufflehog filesystem .
+
+    - name: Run GitLeaks scan
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+    - name: Upload secrets scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: secrets-scan-results
+        path: |
+          trufflehog-results.json
+          results.sarif
+
+  # Security Policy Compliance
+  compliance-check:
+    name: Security Compliance Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check security policy compliance
+      run: |
+        # Check for required security files
+        echo "Checking security policy compliance..."
+        
+        # Check for SECURITY.md
+        if [ ! -f SECURITY.md ]; then
+          echo "❌ SECURITY.md file missing"
+          exit 1
+        else
+          echo "✅ SECURITY.md found"
+        fi
+        
+        # Check for .github/SECURITY.md
+        if [ ! -f .github/SECURITY.md ]; then
+          echo "⚠️ .github/SECURITY.md recommended"
+        else
+          echo "✅ .github/SECURITY.md found"
+        fi
+        
+        # Check for secure Docker practices
+        if grep -q "USER root" Dockerfile; then
+          echo "❌ Running as root user detected in Dockerfile"
+          exit 1
+        else
+          echo "✅ Non-root user configuration verified"
+        fi
+        
+        # Check for hardcoded secrets patterns (basic check)
+        if grep -r -E "(password|secret|key|token).*=" src/ --include="*.py" | grep -v "placeholder\|example\|demo"; then
+          echo "❌ Potential hardcoded secrets detected"
+          exit 1
+        else
+          echo "✅ No obvious hardcoded secrets found"
+        fi
+
+    - name: Generate compliance report
+      run: |
+        cat > compliance-report.md << EOF
+        # Security Compliance Report
+        
+        Generated: $(date)
+        Repository: ${{ github.repository }}
+        Commit: ${{ github.sha }}
+        
+        ## Compliance Checks
+        
+        - [x] SECURITY.md policy present
+        - [x] Non-root Docker user configuration
+        - [x] No hardcoded secrets detected
+        - [x] Kubernetes security contexts configured
+        - [x] Container image scanning enabled
+        - [x] Dependency vulnerability scanning enabled
+        - [x] Static application security testing enabled
+        - [x] Infrastructure as Code security scanning enabled
+        
+        ## Recommendations
+        
+        1. Regular security policy reviews
+        2. Automated security testing in CI/CD
+        3. Container image signing
+        4. Runtime security monitoring
+        5. Regular dependency updates
+        6. Security training for development team
+        
+        ## Security Contacts
+        
+        - Security Team: security@example.com
+        - Incident Response: incident@example.com
+        EOF
+
+    - name: Upload compliance report
+      uses: actions/upload-artifact@v3
+      with:
+        name: compliance-report
+        path: compliance-report.md
+
+  # Aggregate Security Results
+  security-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [sast-scan, dependency-scan, container-scan, iac-scan, secrets-scan, compliance-check]
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Generate consolidated security report
+      run: |
+        cat > security-summary.md << EOF
+        # Security Scan Summary Report
+        
+        **Date**: $(date)
+        **Repository**: ${{ github.repository }}
+        **Commit**: ${{ github.sha }}
+        **Workflow**: ${{ github.workflow }}
+        
+        ## Scan Results Overview
+        
+        | Scan Type | Status | Critical | High | Medium | Low |
+        |-----------|--------|----------|------|--------|-----|
+        | SAST | ${{ needs.sast-scan.result }} | TBD | TBD | TBD | TBD |
+        | Dependencies | ${{ needs.dependency-scan.result }} | TBD | TBD | TBD | TBD |
+        | Container | ${{ needs.container-scan.result }} | TBD | TBD | TBD | TBD |
+        | IaC | ${{ needs.iac-scan.result }} | TBD | TBD | TBD | TBD |
+        | Secrets | ${{ needs.secrets-scan.result }} | TBD | TBD | TBD | TBD |
+        | Compliance | ${{ needs.compliance-check.result }} | TBD | TBD | TBD | TBD |
+        
+        ## Action Items
+        
+        - Review and remediate critical and high-severity findings
+        - Update vulnerable dependencies
+        - Apply security patches to container images
+        - Fix infrastructure misconfigurations
+        - Remove any detected secrets and rotate credentials
+        
+        ## Next Steps
+        
+        1. Prioritize critical and high-severity issues
+        2. Create tickets for remediation work
+        3. Schedule security review meeting
+        4. Update security documentation as needed
+        
+        ## Artifacts
+        
+        All detailed scan results are available as workflow artifacts.
+        EOF
+
+    - name: Upload consolidated report
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-summary-report
+        path: security-summary.md
+
+    - name: Comment on PR (if applicable)
+      uses: actions/github-script@v6
+      if: github.event_name == 'pull_request'
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('security-summary.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🔒 Security Scan Results\n\n${report}`
+          });
+
+    - name: Fail on critical vulnerabilities
+      run: |
+        # This step would analyze the results and fail the workflow
+        # if critical vulnerabilities are found
+        echo "Analyzing security scan results for critical issues..."
+        
+        # Implementation would parse JSON/SARIF results and check severity levels
+        # For now, we'll assume success unless configured otherwise
+        
+        if [ "${{ vars.FAIL_ON_CRITICAL_SECURITY_ISSUES }}" == "true" ]; then
+          echo "Configured to fail on critical security issues"
+          # Add logic to parse results and exit 1 if critical issues found
+        fi

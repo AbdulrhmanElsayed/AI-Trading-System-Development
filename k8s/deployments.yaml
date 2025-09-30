@@ -1,0 +1,720 @@
+# Kubernetes Namespace for Trading System
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trading-system
+  labels:
+    app: ai-trading-system
+    version: v1.0.0
+---
+# PostgreSQL Database Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: trading-system
+  labels:
+    app: postgres
+    component: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        component: database
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: trading_system
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - $(POSTGRES_USER)
+            - -d
+            - $(POSTGRES_DB)
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - $(POSTGRES_USER)
+            - -d
+            - $(POSTGRES_DB)
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: trading-system
+  labels:
+    app: postgres
+    component: database
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+---
+# TimescaleDB Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: timescaledb-deployment
+  namespace: trading-system
+  labels:
+    app: timescaledb
+    component: timeseries-database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: timescaledb
+  template:
+    metadata:
+      labels:
+        app: timescaledb
+        component: timeseries-database
+    spec:
+      containers:
+      - name: timescaledb
+        image: timescale/timescaledb:latest-pg15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: market_data
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: timescaledb-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: timescaledb-secret
+              key: password
+        volumeMounts:
+        - name: timescaledb-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - $(POSTGRES_USER)
+            - -d
+            - $(POSTGRES_DB)
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - $(POSTGRES_USER)
+            - -d
+            - $(POSTGRES_DB)
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: timescaledb-storage
+        persistentVolumeClaim:
+          claimName: timescaledb-pvc
+---
+# TimescaleDB Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-service
+  namespace: trading-system
+  labels:
+    app: timescaledb
+    component: timeseries-database
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: timescaledb
+---
+# Redis Cache Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: trading-system
+  labels:
+    app: redis
+    component: cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        component: cache
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        args:
+        - redis-server
+        - --requirepass
+        - $(REDIS_PASSWORD)
+        - --appendonly
+        - "yes"
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+        volumeMounts:
+        - name: redis-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: redis-pvc
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: trading-system
+  labels:
+    app: redis
+    component: cache
+spec:
+  ports:
+  - port: 6379
+    targetPort: 6379
+  selector:
+    app: redis
+---
+# Data Processor Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-processor-deployment
+  namespace: trading-system
+  labels:
+    app: data-processor
+    component: data-processing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: data-processor
+  template:
+    metadata:
+      labels:
+        app: data-processor
+        component: data-processing
+    spec:
+      containers:
+      - name: data-processor
+        image: trading-system:data-processor
+        ports:
+        - containerPort: 8001
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: postgres-url
+        - name: TIMESCALE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: timescale-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: redis-url
+        - name: ALPHA_VANTAGE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-keys
+              key: alpha-vantage
+        - name: FINNHUB_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: api-keys
+              key: finnhub
+        volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: data-pvc
+---
+# Data Processor Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-processor-service
+  namespace: trading-system
+  labels:
+    app: data-processor
+    component: data-processing
+spec:
+  ports:
+  - port: 8001
+    targetPort: 8001
+  selector:
+    app: data-processor
+---
+# ML Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-service-deployment
+  namespace: trading-system
+  labels:
+    app: ml-service
+    component: machine-learning
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-service
+  template:
+    metadata:
+      labels:
+        app: ml-service
+        component: machine-learning
+    spec:
+      containers:
+      - name: ml-service
+        image: trading-system:ml-service
+        ports:
+        - containerPort: 8002
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: postgres-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: redis-url
+        - name: ML_MODEL_PATH
+          value: /app/models
+        volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+        - name: models-volume
+          mountPath: /app/models
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          initialDelaySeconds: 120
+          periodSeconds: 60
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8002
+          initialDelaySeconds: 60
+          periodSeconds: 30
+      volumes:
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      - name: models-volume
+        persistentVolumeClaim:
+          claimName: models-pvc
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: data-pvc
+---
+# ML Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-service
+  namespace: trading-system
+  labels:
+    app: ml-service
+    component: machine-learning
+spec:
+  ports:
+  - port: 8002
+    targetPort: 8002
+  selector:
+    app: ml-service
+---
+# Risk Management Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: risk-service-deployment
+  namespace: trading-system
+  labels:
+    app: risk-service
+    component: risk-management
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: risk-service
+  template:
+    metadata:
+      labels:
+        app: risk-service
+        component: risk-management
+    spec:
+      containers:
+      - name: risk-service
+        image: trading-system:risk-service
+        ports:
+        - containerPort: 8003
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: postgres-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: redis-url
+        - name: MAX_PORTFOLIO_RISK
+          value: "0.02"
+        - name: MAX_POSITION_SIZE
+          value: "0.1"
+        volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8003
+          initialDelaySeconds: 15
+          periodSeconds: 10
+      volumes:
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: logs-pvc
+---
+# Risk Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk-service
+  namespace: trading-system
+  labels:
+    app: risk-service
+    component: risk-management
+spec:
+  ports:
+  - port: 8003
+    targetPort: 8003
+  selector:
+    app: risk-service
+---
+# Execution Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: execution-service-deployment
+  namespace: trading-system
+  labels:
+    app: execution-service
+    component: order-execution
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: execution-service
+  template:
+    metadata:
+      labels:
+        app: execution-service
+        component: order-execution
+    spec:
+      containers:
+      - name: execution-service
+        image: trading-system:execution-service
+        ports:
+        - containerPort: 8004
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: postgres-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: redis-url
+        - name: ALPACA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: broker-keys
+              key: alpaca-api-key
+        - name: ALPACA_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: broker-keys
+              key: alpaca-secret-key
+        - name: ALPACA_BASE_URL
+          value: "https://paper-api.alpaca.markets"
+        volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8004
+          initialDelaySeconds: 30
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8004
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: logs-pvc
+---
+# Execution Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: execution-service
+  namespace: trading-system
+  labels:
+    app: execution-service
+    component: order-execution
+spec:
+  ports:
+  - port: 8004
+    targetPort: 8004
+  selector:
+    app: execution-service
+---
+# Main Trading Application Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-app-deployment
+  namespace: trading-system
+  labels:
+    app: trading-app
+    component: main-application
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trading-app
+  template:
+    metadata:
+      labels:
+        app: trading-app
+        component: main-application
+    spec:
+      containers:
+      - name: trading-app
+        image: trading-system:production
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: postgres-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-urls
+              key: redis-url
+        - name: ENVIRONMENT
+          value: production
+        volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+        - name: config-volume
+          mountPath: /app/config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      - name: config-volume
+        configMap:
+          name: trading-config
+---
+# Trading App Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-app-service
+  namespace: trading-system
+  labels:
+    app: trading-app
+    component: main-application
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: trading-app

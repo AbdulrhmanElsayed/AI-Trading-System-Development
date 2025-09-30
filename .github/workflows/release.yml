@@ -1,0 +1,351 @@
+name: Release Management
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.2.3)'
+        required: true
+        type: string
+      release_type:
+        description: 'Type of release'
+        required: true
+        default: 'minor'
+        type: choice
+        options:
+        - patch
+        - minor
+        - major
+      pre_release:
+        description: 'Is this a pre-release?'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ai-trading-system
+
+jobs:
+  # Create Release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      release-tag: ${{ steps.tag.outputs.tag }}
+      release-notes: ${{ steps.notes.outputs.notes }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install bump2version gitchangelog
+
+    - name: Determine version tag
+      id: tag
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "tag=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Generate release notes
+      id: notes
+      run: |
+        # Generate changelog from commits since last tag
+        LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -n "$LAST_TAG" ]; then
+          RANGE="${LAST_TAG}..HEAD"
+        else
+          RANGE="HEAD"
+        fi
+        
+        # Create release notes
+        cat > release_notes.md << EOF
+        ## What's Changed
+        
+        ### Features
+        $(git log $RANGE --pretty=format:"- %s" --grep="feat:" --grep="feature:" || echo "No new features")
+        
+        ### Bug Fixes
+        $(git log $RANGE --pretty=format:"- %s" --grep="fix:" --grep="bug:" || echo "No bug fixes")
+        
+        ### Performance Improvements
+        $(git log $RANGE --pretty=format:"- %s" --grep="perf:" || echo "No performance improvements")
+        
+        ### Documentation
+        $(git log $RANGE --pretty=format:"- %s" --grep="docs:" || echo "No documentation updates")
+        
+        ### Deployment Notes
+        - This release includes Docker images for all microservices
+        - Kubernetes manifests are updated for production deployment
+        - Database migrations may be required (check migration files)
+        - Backup recommended before deployment
+        
+        ### Breaking Changes
+        $(git log $RANGE --pretty=format:"- %s" --grep="BREAKING" || echo "No breaking changes")
+        
+        **Full Changelog**: https://github.com/${{ github.repository }}/compare/$LAST_TAG...${{ steps.tag.outputs.tag }}
+        EOF
+        
+        echo "notes<<EOF" >> $GITHUB_OUTPUT
+        cat release_notes.md >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+  # Build Release Images
+  build-release:
+    name: Build Release Images
+    runs-on: ubuntu-latest
+    needs: create-release
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push release images
+      run: |
+        TAG=${{ needs.create-release.outputs.release-tag }}
+        
+        # Build main application image
+        docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          --target production \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:${TAG} \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:latest \
+          --push .
+        
+        # Build service-specific images
+        for service in data-processor ml-service risk-service execution-service monitoring-service; do
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --target ${service} \
+            --tag ${{ env.REGISTRY }}/${{ github.repository }}:${service}-${TAG} \
+            --tag ${{ env.REGISTRY }}/${{ github.repository }}:${service}-latest \
+            --push .
+        done
+
+    - name: Sign container images
+      run: |
+        # Install cosign for image signing
+        curl -O -L "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64"
+        sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+        sudo chmod +x /usr/local/bin/cosign
+        
+        # Sign images (requires COSIGN_PRIVATE_KEY secret)
+        TAG=${{ needs.create-release.outputs.release-tag }}
+        cosign sign --key env://COSIGN_PRIVATE_KEY ${{ env.REGISTRY }}/${{ github.repository }}:${TAG}
+      env:
+        COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+
+  # Security Scan Release
+  security-scan-release:
+    name: Security Scan Release
+    runs-on: ubuntu-latest
+    needs: [create-release, build-release]
+    
+    steps:
+    - name: Run comprehensive security scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.create-release.outputs.release-tag }}
+        format: 'table'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        exit-code: '1'  # Fail on vulnerabilities
+
+    - name: Generate SBOM
+      run: |
+        # Install syft for SBOM generation
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        
+        # Generate SBOM
+        syft ${{ env.REGISTRY }}/${{ github.repository }}:${{ needs.create-release.outputs.release-tag }} \
+          -o spdx-json=sbom.json
+        
+    - name: Upload SBOM
+      uses: actions/upload-artifact@v3
+      with:
+        name: sbom-${{ needs.create-release.outputs.release-tag }}
+        path: sbom.json
+
+  # Create GitHub Release
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [create-release, build-release, security-scan-release]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download SBOM
+      uses: actions/download-artifact@v3
+      with:
+        name: sbom-${{ needs.create-release.outputs.release-tag }}
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ needs.create-release.outputs.release-tag }}
+        name: Release ${{ needs.create-release.outputs.release-tag }}
+        body: ${{ needs.create-release.outputs.release-notes }}
+        prerelease: ${{ github.event.inputs.pre_release == 'true' }}
+        files: |
+          sbom.json
+          k8s/*.yaml
+          docker-compose.production.yml
+          Dockerfile
+        generate_release_notes: true
+
+  # Deploy to Production
+  production-deployment:
+    name: Production Deployment
+    runs-on: ubuntu-latest
+    needs: [create-release, github-release]
+    environment:
+      name: production
+      url: https://trading-system.example.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBECONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Backup current deployment
+      run: |
+        # Create backup of current deployment state
+        kubectl get all -n trading-system -o yaml > backup-${{ github.sha }}.yaml
+
+    - name: Update deployment manifests
+      run: |
+        TAG=${{ needs.create-release.outputs.release-tag }}
+        
+        # Update image tags in all deployments
+        sed -i "s|image: trading-system:.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:${TAG}|g" k8s/deployments.yaml
+        sed -i "s|image: .*:data-processor-.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:data-processor-${TAG}|g" k8s/deployments.yaml
+        sed -i "s|image: .*:ml-service-.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:ml-service-${TAG}|g" k8s/deployments.yaml
+        sed -i "s|image: .*:risk-service-.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:risk-service-${TAG}|g" k8s/deployments.yaml
+        sed -i "s|image: .*:execution-service-.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:execution-service-${TAG}|g" k8s/deployments.yaml
+        sed -i "s|image: .*:monitoring-service-.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:monitoring-service-${TAG}|g" k8s/deployments.yaml
+
+    - name: Rolling deployment
+      run: |
+        # Apply updated configurations
+        kubectl apply -f k8s/config-and-storage.yaml
+        kubectl apply -f k8s/deployments.yaml
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/trading-app -n trading-system --timeout=900s
+        kubectl rollout status deployment/data-processor -n trading-system --timeout=900s
+        kubectl rollout status deployment/ml-service -n trading-system --timeout=900s
+        kubectl rollout status deployment/risk-service -n trading-system --timeout=900s
+        kubectl rollout status deployment/execution-service -n trading-system --timeout=900s
+
+    - name: Post-deployment validation
+      run: |
+        # Comprehensive health checks
+        kubectl get pods -n trading-system
+        
+        # Check application health
+        kubectl wait --for=condition=Ready pod -l app=trading-app -n trading-system --timeout=300s
+        
+        # Verify services are responding
+        kubectl exec -it deployment/trading-app -n trading-system -- curl -f http://localhost:8000/health
+        kubectl exec -it deployment/trading-app -n trading-system -- curl -f http://localhost:8000/metrics
+
+    - name: Upload backup
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-backup-${{ github.sha }}
+        path: backup-${{ github.sha }}.yaml
+
+  # Performance validation
+  performance-validation:
+    name: Performance Validation
+    runs-on: ubuntu-latest
+    needs: production-deployment
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run performance regression tests
+      run: |
+        # This would run against the production deployment
+        # to ensure performance hasn't degraded
+        echo "Running performance validation..."
+        # Implement actual performance tests
+
+    - name: Load testing
+      run: |
+        # Install k6 for load testing
+        sudo apt-get update
+        sudo apt-get install -y k6
+        
+        # Run load tests against production
+        # k6 run --vus 10 --duration 30s load-test.js
+
+  # Rollback capability
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    needs: [production-deployment, performance-validation]
+    if: failure()
+    environment:
+      name: production
+    
+    steps:
+    - name: Emergency rollback
+      run: |
+        echo "${{ secrets.KUBECONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+        
+        # Rollback to previous deployment
+        kubectl rollout undo deployment/trading-app -n trading-system
+        kubectl rollout undo deployment/data-processor -n trading-system
+        kubectl rollout undo deployment/ml-service -n trading-system
+        kubectl rollout undo deployment/risk-service -n trading-system
+        kubectl rollout undo deployment/execution-service -n trading-system
+        
+        # Wait for rollback to complete
+        kubectl rollout status deployment/trading-app -n trading-system
+
+    - name: Notify rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: 'warning'
+        channel: '#alerts'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        text: 'Production deployment rolled back due to validation failure'

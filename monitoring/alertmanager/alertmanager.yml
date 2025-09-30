@@ -1,0 +1,325 @@
+# Alertmanager Configuration for AI Trading System
+global:
+  smtp_smarthost: 'localhost:587'
+  smtp_from: 'alertmanager@trading-system.com'
+  smtp_auth_username: 'alertmanager@trading-system.com'
+  smtp_auth_password: 'your-smtp-password'
+  smtp_require_tls: true
+  
+  # Slack webhook URL (configure in secrets)
+  slack_api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+  
+  # PagerDuty integration key
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Routing configuration
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default-receiver'
+  
+  # Route critical trading alerts immediately
+  routes:
+    # Critical system alerts - immediate notification
+    - match:
+        severity: critical
+      group_wait: 0s
+      group_interval: 5s
+      repeat_interval: 15m
+      receiver: 'critical-alerts'
+    
+    # Risk management alerts - highest priority
+    - match_re:
+        alertname: 'RiskService.*|PositionLimit.*|UnrealizedLoss.*'
+      group_wait: 0s
+      group_interval: 0s
+      repeat_interval: 5m
+      receiver: 'risk-management-alerts'
+    
+    # Trading execution alerts
+    - match_re:
+        alertname: 'ExecutionService.*|TradingApp.*|LatencySpike'
+      group_wait: 5s
+      group_interval: 10s
+      repeat_interval: 30m
+      receiver: 'trading-alerts'
+    
+    # ML and data processing alerts
+    - match_re:
+        alertname: 'MLService.*|MarketDataStale|MLModelAccuracy.*'
+      group_wait: 30s
+      group_interval: 1m
+      repeat_interval: 1h
+      receiver: 'ml-data-alerts'
+    
+    # Infrastructure alerts
+    - match_re:
+        alertname: 'ServiceDown|HighCPUUsage|HighMemoryUsage|PostgreSQL.*|Redis.*'
+      group_wait: 1m
+      group_interval: 5m
+      repeat_interval: 2h
+      receiver: 'infrastructure-alerts'
+    
+    # Security alerts
+    - match_re:
+        alertname: '.*Login.*|UnauthorizedAPI.*|SecurityViolation.*'
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 30m
+      receiver: 'security-alerts'
+    
+    # Business hours routing (customize based on your trading hours)
+    - match:
+        severity: warning
+      active_time_intervals:
+        - business-hours
+      receiver: 'business-hours-alerts'
+    
+    # After hours - only critical alerts
+    - match:
+        severity: warning
+      active_time_intervals:
+        - after-hours
+      receiver: 'after-hours-minimal'
+
+# Time intervals for business hours
+time_intervals:
+  - name: business-hours
+    time_intervals:
+      - times:
+          - start_time: '09:00'
+            end_time: '17:00'
+        weekdays: ['monday:friday']
+        location: 'America/New_York'
+  
+  - name: after-hours
+    time_intervals:
+      - times:
+          - start_time: '17:00'
+            end_time: '09:00'
+        weekdays: ['monday:friday']
+        location: 'America/New_York'
+      - weekdays: ['saturday', 'sunday']
+        location: 'America/New_York'
+
+# Alert receivers configuration
+receivers:
+  # Default receiver
+  - name: 'default-receiver'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#alerts'
+        title: 'Trading System Alert'
+        text: 'Summary: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        send_resolved: true
+
+  # Critical alerts - multiple notification channels
+  - name: 'critical-alerts'
+    pagerduty_configs:
+      - routing_key: 'your-pagerduty-integration-key'
+        description: 'CRITICAL: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        severity: 'critical'
+    
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#critical-alerts'
+        color: 'danger'
+        title: '🚨 CRITICAL TRADING SYSTEM ALERT'
+        text: |
+          {{ range .Alerts }}
+          **Alert:** {{ .Annotations.summary }}
+          **Description:** {{ .Annotations.description }}
+          **Severity:** {{ .Labels.severity }}
+          **Time:** {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+        send_resolved: true
+        actions:
+          - type: button
+            text: 'View Grafana Dashboard'
+            url: 'http://grafana:3000/d/trading-overview'
+          - type: button
+            text: 'View Prometheus'
+            url: 'http://prometheus:9090'
+    
+    email_configs:
+      - to: 'oncall@trading-system.com'
+        from: 'alertmanager@trading-system.com'
+        subject: 'CRITICAL: Trading System Alert'
+        html: |
+          <h2>Critical Trading System Alert</h2>
+          {{ range .Alerts }}
+          <p><strong>{{ .Annotations.summary }}</strong></p>
+          <p>{{ .Annotations.description }}</p>
+          <p>Severity: {{ .Labels.severity }}</p>
+          <p>Time: {{ .StartsAt.Format "2006-01-02 15:04:05" }}</p>
+          <hr>
+          {{ end }}
+        send_resolved: true
+
+  # Risk management alerts - immediate escalation
+  - name: 'risk-management-alerts'
+    pagerduty_configs:
+      - routing_key: 'risk-team-pagerduty-key'
+        description: 'RISK ALERT: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        severity: 'critical'
+        client: 'Trading System Risk Management'
+    
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/RISK/TEAM/WEBHOOK'
+        channel: '#risk-management'
+        color: 'danger'
+        title: '⚠️ RISK MANAGEMENT ALERT ⚠️'
+        text: |
+          {{ range .Alerts }}
+          🚨 **IMMEDIATE ACTION REQUIRED**
+          **Alert:** {{ .Annotations.summary }}
+          **Description:** {{ .Annotations.description }}
+          **Time:** {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+        send_resolved: true
+    
+    webhook_configs:
+      - url: 'http://risk-service:8003/alerts/webhook'
+        send_resolved: true
+        http_config:
+          basic_auth:
+            username: 'alertmanager'
+            password: 'webhook-password'
+
+  # Trading execution alerts
+  - name: 'trading-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/TRADING/TEAM/WEBHOOK'
+        channel: '#trading-execution'
+        color: 'warning'
+        title: '📈 Trading System Alert'
+        text: |
+          {{ range .Alerts }}
+          **Alert:** {{ .Annotations.summary }}
+          **Description:** {{ .Annotations.description }}
+          **Service:** {{ .Labels.job }}
+          **Time:** {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+        send_resolved: true
+
+  # ML and data processing alerts
+  - name: 'ml-data-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/DATA/TEAM/WEBHOOK'
+        channel: '#ml-data-alerts'
+        color: 'good'
+        title: '🤖 ML/Data Processing Alert'
+        text: |
+          {{ range .Alerts }}
+          **Alert:** {{ .Annotations.summary }}
+          **Description:** {{ .Annotations.description }}
+          **Service:** {{ .Labels.job }}
+          {{ end }}
+        send_resolved: true
+    
+    email_configs:
+      - to: 'ml-team@trading-system.com'
+        from: 'alertmanager@trading-system.com'
+        subject: 'ML/Data Alert: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Service: {{ .Labels.job }}
+          Time: {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+  # Infrastructure alerts
+  - name: 'infrastructure-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/INFRA/TEAM/WEBHOOK'
+        channel: '#infrastructure'
+        title: '🔧 Infrastructure Alert'
+        text: |
+          {{ range .Alerts }}
+          **Alert:** {{ .Annotations.summary }}
+          **Instance:** {{ .Labels.instance }}
+          **Description:** {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+  # Security alerts
+  - name: 'security-alerts'
+    pagerduty_configs:
+      - routing_key: 'security-team-pagerduty-key'
+        description: 'SECURITY: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        severity: 'error'
+    
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/SECURITY/TEAM/WEBHOOK'
+        channel: '#security-alerts'
+        color: 'danger'
+        title: '🔒 Security Alert'
+        text: |
+          {{ range .Alerts }}
+          🚨 **SECURITY INCIDENT**
+          **Alert:** {{ .Annotations.summary }}
+          **Description:** {{ .Annotations.description }}
+          **Time:** {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+        send_resolved: true
+
+  # Business hours alerts
+  - name: 'business-hours-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#alerts'
+        title: 'Trading System Alert (Business Hours)'
+        text: |
+          {{ range .Alerts }}
+          **Alert:** {{ .Annotations.summary }}
+          **Description:** {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+  # Minimal after-hours notifications
+  - name: 'after-hours-minimal'
+    email_configs:
+      - to: 'oncall@trading-system.com'
+        from: 'alertmanager@trading-system.com'
+        subject: 'After Hours Alert: {{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Time: {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+# Inhibition rules - prevent spam during cascading failures
+inhibit_rules:
+  # Inhibit service-specific alerts when the entire service is down
+  - source_matchers:
+      - alertname = "ServiceDown"
+    target_matchers:
+      - alertname =~ ".*Service.*"
+    equal:
+      - job
+      - instance
+
+  # Inhibit high-level resource alerts when node is down
+  - source_matchers:
+      - alertname = "ServiceDown"
+      - job = "node-exporter"
+    target_matchers:
+      - alertname =~ "HighCPUUsage|HighMemoryUsage|DiskSpaceUsage"
+    equal:
+      - instance
+
+  # Inhibit database-specific alerts when PostgreSQL is down
+  - source_matchers:
+      - alertname = "PostgreSQLDown"
+    target_matchers:
+      - alertname =~ "PostgreSQL.*"
+    equal:
+      - instance

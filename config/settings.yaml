@@ -1,0 +1,239 @@
+# System Configuration
+system:
+  name: "AI Trading System"
+  version: "1.0.0"
+  environment: "development"  # development, testing, production
+  log_level: "INFO"
+  timezone: "UTC"
+
+# Trading Configuration
+trading:
+  # Markets to trade
+  markets:
+    - "stocks"
+    - "crypto"
+    - "forex"
+  
+  # Primary trading parameters
+  base_currency: "USD"
+  initial_capital: 100000.0
+  max_position_size: 0.1  # 10% of portfolio per position
+  max_positions: 10
+  
+  # Trading frequency
+  trading_frequency: "1m"  # 1m, 5m, 15m, 1h, 4h, 1d
+  
+  # Risk parameters
+  max_daily_loss: 0.02  # 2% max daily loss
+  max_drawdown: 0.15    # 15% max drawdown
+  stop_loss: 0.05       # 5% stop loss
+  take_profit: 0.15     # 15% take profit
+
+# Data Sources
+data_sources:
+  # Stock data
+  stocks:
+    primary: "yfinance"
+    backup: "alpha_vantage"
+    symbols: ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "GOOGL", "AMZN"]
+  
+  # Crypto data
+  crypto:
+    exchanges: ["binance", "coinbase", "kraken"]
+    symbols: ["BTC/USD", "ETH/USD", "ADA/USD", "SOL/USD"]
+  
+  # Forex data
+  forex:
+    provider: "oanda"
+    symbols: ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"]
+  
+  # News and sentiment
+  news:
+    sources: ["newsapi", "finnhub", "alpha_vantage_news"]
+    sentiment_model: "vader"  # vader, textblob, transformers
+
+# Machine Learning Configuration
+ml:
+  # Model types to use
+  models:
+    - "lstm"
+    - "transformer"
+    - "xgboost"
+    - "random_forest"
+    - "svm"
+  
+  # Training parameters
+  training:
+    lookback_period: 60  # days
+    train_test_split: 0.8
+    validation_split: 0.1
+    batch_size: 64
+    epochs: 100
+    early_stopping_patience: 10
+  
+  # Feature engineering
+  features:
+    technical_indicators: true
+    sentiment_scores: true
+    economic_indicators: true
+    price_patterns: true
+    volume_analysis: true
+  
+  # Reinforcement learning
+  rl:
+    algorithm: "PPO"  # PPO, A3C, DQN
+    reward_function: "sharpe_ratio"
+    training_episodes: 1000
+
+# Database Configuration
+database:
+  # Main database (PostgreSQL)
+  main:
+    host: "localhost"
+    port: 5432
+    database: "trading_system"
+    user: "trader"
+    password: "${DATABASE_PASSWORD}"
+  
+  # Time series database (TimescaleDB)
+  timeseries:
+    host: "localhost"
+    port: 5433
+    database: "market_data"
+    user: "trader"
+    password: "${TIMESERIES_PASSWORD}"
+  
+  # Cache (Redis)
+  cache:
+    host: "localhost"
+    port: 6379
+    database: 0
+    password: "${REDIS_PASSWORD}"
+
+# API Configuration
+apis:
+  # Broker APIs
+  brokers:
+    alpaca:
+      api_key: "${ALPACA_API_KEY}"
+      secret_key: "${ALPACA_SECRET_KEY}"
+      base_url: "https://paper-api.alpaca.markets"  # Paper trading
+    
+    interactive_brokers:
+      host: "localhost"
+      port: 7497  # TWS paper trading port
+      client_id: 1
+    
+    binance:
+      api_key: "${BINANCE_API_KEY}"
+      secret_key: "${BINANCE_SECRET_KEY}"
+      testnet: true  # Use testnet for development
+  
+  # Data APIs
+  data_apis:
+    alpha_vantage:
+      api_key: "${ALPHA_VANTAGE_API_KEY}"
+    
+    finnhub:
+      api_key: "${FINNHUB_API_KEY}"
+    
+    newsapi:
+      api_key: "${NEWSAPI_API_KEY}"
+
+# Risk Management
+risk_management:
+  # Position sizing
+  position_sizing:
+    method: "kelly_criterion"  # fixed, kelly_criterion, volatility_based
+    max_leverage: 2.0
+  
+  # Risk limits
+  limits:
+    max_correlation: 0.7  # Maximum correlation between positions
+    var_confidence: 0.05  # 95% VaR confidence level
+    max_sector_exposure: 0.3  # 30% max exposure to single sector
+  
+  # Stop loss rules
+  stop_loss:
+    method: "trailing"  # fixed, trailing, volatility_based
+    trailing_distance: 0.02  # 2%
+
+# Monitoring and Alerts
+monitoring:
+  # Performance metrics
+  metrics:
+    update_interval: 300  # seconds
+    save_interval: 3600   # seconds
+  
+  # Alerting
+  alerts:
+    email:
+      enabled: true
+      smtp_server: "smtp.gmail.com"
+      smtp_port: 587
+      username: "${EMAIL_USERNAME}"
+      password: "${EMAIL_PASSWORD}"
+      recipients: ["trader@example.com"]
+    
+    slack:
+      enabled: false
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+    
+    # Alert conditions
+    conditions:
+      - metric: "drawdown"
+        threshold: 0.05
+        severity: "warning"
+      - metric: "drawdown"
+        threshold: 0.10
+        severity: "critical"
+      - metric: "daily_pnl"
+        threshold: -1000
+        severity: "warning"
+
+# Backtesting Configuration
+backtesting:
+  start_date: "2020-01-01"
+  end_date: "2023-12-31"
+  initial_capital: 100000
+  commission: 0.001  # 0.1% per trade
+  slippage: 0.0005   # 0.05% slippage
+  
+# Deployment Configuration
+deployment:
+  # Docker settings
+  docker:
+    image_name: "ai-trading-system"
+    tag: "latest"
+  
+  # Kubernetes settings
+  kubernetes:
+    namespace: "trading"
+    replicas: 2
+    resources:
+      cpu_request: "500m"
+      memory_request: "1Gi"
+      cpu_limit: "2000m"
+      memory_limit: "4Gi"
+  
+  # Cloud settings
+  cloud:
+    provider: "aws"  # aws, gcp, azure
+    region: "us-east-1"
+    
+# Security Configuration
+security:
+  # API rate limiting
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 60
+  
+  # Encryption
+  encryption:
+    algorithm: "AES-256"
+    key_rotation_days: 90
+  
+  # Authentication
+  authentication:
+    jwt_secret: "${JWT_SECRET}"
+    token_expiry: 3600  # seconds

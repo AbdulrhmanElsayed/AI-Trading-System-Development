@@ -1,0 +1,294 @@
+groups:
+  - name: trading-system-alerts
+    rules:
+      # High-level system health alerts
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.instance }} is down"
+          description: "{{ $labels.job }} service on {{ $labels.instance }} has been down for more than 1 minute."
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is above 80% for more than 5 minutes on {{ $labels.instance }}"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemFree_bytes - node_memory_Buffers_bytes - node_memory_Cached_bytes) / node_memory_MemTotal_bytes * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is above 90% for more than 5 minutes on {{ $labels.instance }}"
+
+      - alert: DiskSpaceUsage
+        expr: (node_filesystem_size_bytes - node_filesystem_free_bytes) / node_filesystem_size_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk space usage"
+          description: "Disk usage is above 85% on {{ $labels.device }} at {{ $labels.instance }}"
+
+      # Trading system specific alerts
+      - alert: TradingAppResponseTime
+        expr: http_request_duration_seconds{quantile="0.95", job="trading-app"} > 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Trading application slow response time"
+          description: "95th percentile response time is above 2 seconds for {{ $labels.instance }}"
+
+      - alert: TradingAppErrorRate
+        expr: rate(http_requests_total{job="trading-app", status=~"5.."}[5m]) / rate(http_requests_total{job="trading-app"}[5m]) * 100 > 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate in trading application"
+          description: "Error rate is above 5% for more than 2 minutes"
+
+      - alert: MLServiceDown
+        expr: up{job="ml-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ML Service is down"
+          description: "Machine Learning service has been down for more than 1 minute, affecting trading decisions"
+
+      - alert: RiskServiceDown
+        expr: up{job="risk-service"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Risk Service is down"
+          description: "Risk management service has been down for more than 30 seconds - IMMEDIATE ATTENTION REQUIRED"
+
+      - alert: ExecutionServiceDown
+        expr: up{job="execution-service"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Execution Service is down"
+          description: "Trade execution service has been down for more than 30 seconds - TRADES MAY BE FAILING"
+
+      # Database alerts
+      - alert: PostgreSQLDown
+        expr: up{job="postgres-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database has been unreachable for more than 1 minute"
+
+      - alert: PostgreSQLTooManyConnections
+        expr: pg_stat_activity_count / pg_settings_max_connections * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL has too many connections"
+          description: "PostgreSQL connection usage is above 80% ({{ $value }}%)"
+
+      - alert: PostgreSQLSlowQueries
+        expr: rate(pg_stat_user_tables_n_tup_ins[5m]) + rate(pg_stat_user_tables_n_tup_upd[5m]) + rate(pg_stat_user_tables_n_tup_del[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL experiencing high write load"
+          description: "Database write operations are very high ({{ $value }} ops/sec)"
+
+      # Redis alerts
+      - alert: RedisDown
+        expr: up{job="redis-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis cache has been unreachable for more than 1 minute"
+
+      - alert: RedisHighMemoryUsage
+        expr: redis_memory_used_bytes / redis_memory_max_bytes * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory usage is high"
+          description: "Redis memory usage is above 90% ({{ $value }}%)"
+
+      # Container alerts
+      - alert: ContainerHighCPU
+        expr: rate(container_cpu_usage_seconds_total[5m]) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container high CPU usage"
+          description: "Container {{ $labels.name }} CPU usage is above 80%"
+
+      - alert: ContainerHighMemory
+        expr: container_memory_usage_bytes / container_spec_memory_limit_bytes * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container high memory usage"
+          description: "Container {{ $labels.name }} memory usage is above 90%"
+
+      - alert: ContainerRestarting
+        expr: rate(container_last_seen[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container is restarting frequently"
+          description: "Container {{ $labels.name }} has restarted more than once in the last 5 minutes"
+
+  - name: trading-business-logic-alerts
+    rules:
+      # Business logic alerts
+      - alert: UnusualTradingVolume
+        expr: rate(trading_orders_total[15m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unusual trading volume detected"
+          description: "Trading volume is unusually high: {{ $value }} orders/sec"
+
+      - alert: HighRejectionRate
+        expr: rate(trading_orders_rejected_total[5m]) / rate(trading_orders_total[5m]) * 100 > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High order rejection rate"
+          description: "Order rejection rate is above 10%: {{ $value }}%"
+
+      - alert: PositionLimitExceeded
+        expr: trading_position_exposure_ratio > 0.95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Position limit nearly exceeded"
+          description: "Position exposure is above 95% of limit: {{ $value }}"
+
+      - alert: UnrealizedLossThreshold
+        expr: trading_unrealized_pnl_ratio < -0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Unrealized loss threshold breached"
+          description: "Unrealized P&L is below -5%: {{ $value }}"
+
+      - alert: MLModelAccuracyDrop
+        expr: ml_model_accuracy < 0.7
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ML model accuracy has dropped"
+          description: "Model accuracy is below 70%: {{ $value }}"
+
+      - alert: MarketDataStale
+        expr: time() - market_data_last_update_timestamp > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Market data is stale"
+          description: "Market data hasn't been updated for more than 60 seconds"
+
+      - alert: LatencySpike
+        expr: trading_execution_latency_seconds{quantile="0.95"} > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Execution latency spike detected"
+          description: "95th percentile execution latency is above 500ms: {{ $value }}s"
+
+      - alert: BacktestingFailed
+        expr: increase(backtesting_failed_runs_total[1h]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backtesting runs are failing"
+          description: "{{ $value }} backtesting runs have failed in the last hour"
+
+  - name: infrastructure-alerts
+    rules:
+      # Network and connectivity alerts
+      - alert: HighNetworkLatency
+        expr: probe_duration_seconds{job="blackbox"} > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High network latency detected"
+          description: "Network latency to {{ $labels.instance }} is above 1 second"
+
+      - alert: ExternalServiceUnavailable
+        expr: probe_success{job="blackbox"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "External service unavailable"
+          description: "External service {{ $labels.instance }} is not responding"
+
+      # Storage alerts
+      - alert: PersistentVolumeSpaceRunningOut
+        expr: kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Persistent volume space running out"
+          description: "PV {{ $labels.persistentvolumeclaim }} has less than 15% free space"
+
+      - alert: BackupFailed
+        expr: increase(backup_failed_total[24h]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backup process failed"
+          description: "{{ $value }} backup processes have failed in the last 24 hours"
+
+      # Security alerts
+      - alert: TooManyFailedLogins
+        expr: rate(failed_login_attempts_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Too many failed login attempts"
+          description: "More than 10 failed login attempts per second detected"
+
+      - alert: UnauthorizedAPIAccess
+        expr: rate(http_requests_total{status="401"}[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High rate of unauthorized API access"
+          description: "More than 5 unauthorized requests per second detected"

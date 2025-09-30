@@ -1,0 +1,424 @@
+name: AI Trading System CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run nightly builds at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ai-trading-system
+
+jobs:
+  # Code Quality and Security Checks
+  code-quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+
+    - name: Run code formatting checks
+      run: |
+        black --check --diff src/ tests/
+        isort --check-only --diff src/ tests/
+
+    - name: Run linting
+      run: |
+        flake8 src/ tests/
+        pylint src/
+
+    - name: Run type checking
+      run: |
+        mypy src/
+
+    - name: Security scan with bandit
+      run: |
+        bandit -r src/ -f json -o bandit-report.json
+        bandit -r src/
+
+    - name: Dependency vulnerability check
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json || true
+        safety check
+
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json
+
+  # Comprehensive Testing
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11']
+        test-type: ['unit', 'integration', 'backtesting']
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres_test_pass
+          POSTGRES_USER: test_user
+          POSTGRES_DB: trading_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-${{ matrix.python-version }}-pip-${{ hashFiles('**/requirements*.txt') }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+
+    - name: Set up test environment
+      run: |
+        export DATABASE_URL=postgresql://test_user:postgres_test_pass@localhost:5432/trading_test
+        export REDIS_URL=redis://localhost:6379/0
+        export ENVIRONMENT=test
+
+    - name: Run ${{ matrix.test-type }} tests
+      run: |
+        python -m pytest tests/${{ matrix.test-type }}/ -v \
+          --cov=src \
+          --cov-report=xml \
+          --cov-report=html \
+          --junitxml=junit-${{ matrix.test-type }}-${{ matrix.python-version }}.xml
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.test-type }}-${{ matrix.python-version }}
+        path: |
+          junit-*.xml
+          htmlcov/
+          .coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: ${{ matrix.test-type }}
+        name: codecov-${{ matrix.test-type }}-${{ matrix.python-version }}
+
+  # Performance Testing
+  performance-test:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.event_name == 'schedule'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+
+    - name: Run performance tests
+      run: |
+        python -m pytest tests/performance/ -v \
+          --benchmark-json=benchmark-results.json
+
+    - name: Upload performance results
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-results
+        path: benchmark-results.json
+
+  # Build Docker Images
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker images
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        target: production
+
+    - name: Build service-specific images
+      run: |
+        # Build individual service images
+        docker buildx build --target data-processor \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:data-processor-${{ github.sha }} \
+          --push .
+        
+        docker buildx build --target ml-service \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:ml-service-${{ github.sha }} \
+          --push .
+        
+        docker buildx build --target risk-service \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:risk-service-${{ github.sha }} \
+          --push .
+        
+        docker buildx build --target execution-service \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:execution-service-${{ github.sha }} \
+          --push .
+        
+        docker buildx build --target monitoring-service \
+          --tag ${{ env.REGISTRY }}/${{ github.repository }}:monitoring-service-${{ github.sha }} \
+          --push .
+
+  # Security Scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.trading-system.example.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBECONFIG_STAGING }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Update image tags in K8s manifests
+      run: |
+        sed -i "s|image: trading-system:.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}|g" k8s/deployments.yaml
+
+    - name: Deploy to staging
+      run: |
+        kubectl apply -f k8s/namespace.yaml
+        kubectl apply -f k8s/config-and-storage.yaml
+        kubectl apply -f k8s/deployments.yaml
+        
+        # Wait for deployment to complete
+        kubectl wait --for=condition=available --timeout=600s deployment --all -n trading-system
+
+    - name: Run smoke tests
+      run: |
+        # Run basic health checks
+        kubectl get pods -n trading-system
+        kubectl logs -l app=trading-app -n trading-system --tail=50
+
+  # Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, performance-test]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://trading-system.example.com
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBECONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Blue-Green Deployment Strategy
+      run: |
+        # Update image tags
+        sed -i "s|image: trading-system:.*|image: ${{ env.REGISTRY }}/${{ github.repository }}:${{ github.sha }}|g" k8s/deployments.yaml
+        
+        # Deploy new version (green)
+        kubectl apply -f k8s/deployments.yaml
+        
+        # Wait for new deployment to be ready
+        kubectl wait --for=condition=available --timeout=900s deployment --all -n trading-system
+        
+        # Run health checks
+        kubectl exec -it deployment/trading-app -n trading-system -- curl -f http://localhost:8000/health
+        
+        # Switch traffic (this would be more sophisticated in a real setup)
+        kubectl patch service trading-app-service -n trading-system -p '{"spec":{"selector":{"version":"${{ github.sha }}"}}}'
+
+    - name: Post-deployment verification
+      run: |
+        # Run comprehensive health checks
+        kubectl get pods -n trading-system
+        kubectl logs -l app=trading-app -n trading-system --tail=100
+        
+        # Check metrics endpoint
+        kubectl port-forward service/monitoring-service 9090:9090 -n trading-system &
+        sleep 10
+        curl -f http://localhost:9090/metrics || exit 1
+
+  # Cleanup
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: always()
+    
+    steps:
+    - name: Clean up old Docker images
+      run: |
+        # This would typically be done with a registry cleanup policy
+        echo "Cleanup old images (implement based on registry)"
+
+    - name: Notify deployment status
+      uses: 8398a7/action-slack@v3
+      if: always()
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+
+# Workflow for hotfix deployments
+  hotfix-deploy:
+    name: Hotfix Deployment
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/heads/hotfix/')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Fast-track testing
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+        python -m pytest tests/unit/ -v --maxfail=1
+
+    - name: Emergency deployment
+      run: |
+        echo "Emergency deployment process for hotfix"
+        # Implement fast-track deployment for critical fixes
